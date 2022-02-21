@@ -1100,6 +1100,18 @@ class GitRepository:
         logger.debug("Git show fetched from %s repository (%s)",
                      self.uri, self.dirpath)
 
+    def diff_log(self, commit1, commit2):
+        """
+        git cmd: git log commit1...commit2 --pretty=format:%H
+        this cmd will find the recent public ancestors between two commits,
+        then output commit ids since their recent public ancestors
+        """
+        cmd_diff = ['git', 'log', f'{commit1}...{commit2}', '--pretty=format:%H']
+        for line in self._exec_nb(cmd_diff, cwd=self.dirpath, env=self.gitenv):
+            commit_id = line.strip()
+            if commit_id:
+                yield commit_id
+
     def _fetch_pack(self):
         """Fetch changes and store them in a pack."""
 
