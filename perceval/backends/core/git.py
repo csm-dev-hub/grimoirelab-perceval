@@ -28,6 +28,7 @@
 
 import collections
 import io
+import json
 import logging
 import os
 import re
@@ -37,7 +38,7 @@ import threading
 import dulwich.client
 import dulwich.repo
 
-from grimoirelab_toolkit.datetime import datetime_to_utc, str_to_datetime
+from grimoirelab_toolkit.datetime import datetime_to_utc, str_to_datetime, datetime_utcnow
 
 from ...backend import (Backend,
                         BackendCommand,
@@ -46,6 +47,7 @@ from ...errors import RepositoryError, ParseError
 from ...utils import DEFAULT_DATETIME, DEFAULT_LAST_DATETIME
 
 CATEGORY_COMMIT = 'commit'
+CATEGORY_DIFF_LOG = 'diff_log'
 
 logger = logging.getLogger(__name__)
 
@@ -73,14 +75,15 @@ class Git(Backend):
     """
     version = '0.12.1'
 
-    CATEGORIES = [CATEGORY_COMMIT]
+    CATEGORIES = [CATEGORY_COMMIT, CATEGORY_DIFF_LOG]
 
-    def __init__(self, uri, gitpath, tag=None, archive=None, ssl_verify=True):
+    def __init__(self, uri, gitpath, base_target_info, tag=None, archive=None, ssl_verify=True):
         origin = uri
 
         super().__init__(origin, tag=tag, archive=archive, ssl_verify=ssl_verify)
         self.uri = uri
         self.gitpath = gitpath
+        self.base_target_info = base_target_info
 
     def fetch(self, category=CATEGORY_COMMIT, from_date=DEFAULT_DATETIME, to_date=DEFAULT_LAST_DATETIME,
               branches=None, latest_items=False, no_update=False):
@@ -122,18 +125,23 @@ class Git(Backend):
 
         :returns: a generator of commits
         """
-        if not from_date:
-            from_date = DEFAULT_DATETIME
-        if not to_date:
-            to_date = DEFAULT_LAST_DATETIME
+        kwargs = {}
+        if category == CATEGORY_COMMIT:
+            if not from_date:
+                from_date = DEFAULT_DATETIME
+            if not to_date:
+                to_date = DEFAULT_LAST_DATETIME
 
-        kwargs = {
-            'from_date': from_date,
-            'to_date': to_date,
-            'branches': branches,
-            'latest_items': latest_items,
-            'no_update': no_update
-        }
+            kwargs = {
+                'from_date': from_date,
+                'to_date': to_date,
+                'branches': branches,
+                'latest_items': latest_items,
+                'no_update': no_update
+            }
+        elif category == CATEGORY_DIFF_LOG:
+            kwargs = {'base_target_info': self.base_target_info}
+
         items = super().fetch(category, **kwargs)
 
         return items
@@ -146,29 +154,41 @@ class Git(Backend):
 
         :returns: a generator of items
         """
-        from_date = kwargs['from_date']
-        to_date = kwargs['to_date']
-        branches = kwargs['branches']
-        latest_items = kwargs['latest_items']
-        no_update = kwargs['no_update']
-
         ncommits = 0
 
-        try:
-            if os.path.isfile(self.gitpath):
-                commits = self.__fetch_from_log()
-            else:
-                commits = self.__fetch_from_repo(from_date, to_date, branches,
-                                                 latest_items, no_update)
+        if category == CATEGORY_COMMIT:
+            from_date = kwargs['from_date']
+            to_date = kwargs['to_date']
+            branches = kwargs['branches']
+            latest_items = kwargs['latest_items']
+            no_update = kwargs['no_update']
 
-            for commit in commits:
-                yield commit
-                ncommits += 1
-        except EmptyRepositoryError:
-            pass
+            try:
+                if os.path.isfile(self.gitpath):
+                    commits = self.__fetch_from_log()
+                else:
+                    commits = self.__fetch_from_repo(from_date, to_date, branches,
+                                                     latest_items, no_update)
+
+                for commit in commits:
+                    yield commit
+                    ncommits += 1
+            except EmptyRepositoryError:
+                pass
+
+        elif category == CATEGORY_DIFF_LOG:
+            base_target_info = kwargs['base_target_info']
+            try:
+                commits = self.__fetch_diff_log_frm_repo(base_target_info)
+                for commit in commits:
+                    yield commit
+                    ncommits += 1
+            except EmptyRepositoryError:
+                pass
 
         logger.info("Fetch process completed: %s commits fetched",
                     ncommits)
+
 
     @classmethod
     def has_archiving(cls):
@@ -189,6 +209,8 @@ class Git(Backend):
     @staticmethod
     def metadata_id(item):
         """Extracts the identifier from a Git item."""
+        if 'fetched_on' in item:
+            return str(item['fetched_on'])
 
         return item['commit']
 
@@ -204,6 +226,9 @@ class Git(Backend):
 
         :returns: a UNIX timestamp
         """
+        if 'fetched_on' in item:
+            return item['fetched_on']
+
         ts = item['CommitDate']
         ts = str_to_datetime(ts)
 
@@ -216,6 +241,9 @@ class Git(Backend):
         This backend only generates one type of item which is
         'commit'.
         """
+        if 'fetched_on' in item:
+            return CATEGORY_DIFF_LOG
+
         return CATEGORY_COMMIT
 
     @staticmethod
@@ -261,6 +289,20 @@ class Git(Backend):
 
     def _init_client(self, from_archive=False):
         pass
+
+    def __fetch_diff_log_frm_repo(self, base_target_info):
+        repo = self.__create_git_repository()
+        fetched_on = datetime_utcnow().timestamp()
+
+        dic = base_target_info[self.uri]
+        for info in dic:
+            commit_ids = list(repo.diff_log(info['base'], info['target']))
+            yield {
+                'fetched_on': fetched_on,
+                'base': info['base'],
+                'target': info['target'],
+                'commit_ids': commit_ids
+            }
 
     def __fetch_from_log(self):
         logger.info("Fetching commits: '%s' git repository from log file %s",
@@ -349,8 +391,15 @@ class GitCommand(BackendCommand):
 
             processed_uri = self.parsed_args.uri.lstrip('/')
             git_path = os.path.join(base_path, processed_uri) + '-git'
-
         setattr(self.parsed_args, 'gitpath', git_path)
+
+        if self.parsed_args.base_target_info_json:
+            with open(self.parsed_args.base_target_info_json, 'r') as f:
+                base_target_info = json.load(f)
+        else:
+            base_target_info = {}
+        setattr(self.parsed_args, 'base_target_info', base_target_info)
+
 
     @classmethod
     def setup_cmd_parser(cls):
@@ -366,6 +415,8 @@ class GitCommand(BackendCommand):
         group.add_argument('--branches', dest='branches',
                            nargs='+', type=str, default=None,
                            help="Fetch commits only from these branches")
+        group.add_argument('--base-target-info-json', dest='base_target_info_json',
+                           type=str, help='path of a json file which contains branch base info')
 
         # Mutual exclusive parameters
         exgroup = group.add_mutually_exclusive_group()
