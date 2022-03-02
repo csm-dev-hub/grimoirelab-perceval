@@ -179,7 +179,7 @@ class Git(Backend):
         elif category == CATEGORY_DIFF_LOG:
             base_target_info = kwargs['base_target_info']
             try:
-                commits = self.__fetch_diff_log_frm_repo(base_target_info)
+                commits = self.__fetch_diff_log_from_repo(base_target_info)
                 for commit in commits:
                     yield commit
                     ncommits += 1
@@ -209,8 +209,8 @@ class Git(Backend):
     @staticmethod
     def metadata_id(item):
         """Extracts the identifier from a Git item."""
-        if 'fetched_on' in item:
-            return str(item['fetched_on'])
+        if 'metadata_id' in item:
+            return str(item['metadata_id'])
 
         return item['commit']
 
@@ -241,7 +241,7 @@ class Git(Backend):
         This backend only generates one type of item which is
         'commit'.
         """
-        if 'fetched_on' in item:
+        if 'metadata_id' in item:
             return CATEGORY_DIFF_LOG
 
         return CATEGORY_COMMIT
@@ -290,7 +290,7 @@ class Git(Backend):
     def _init_client(self, from_archive=False):
         pass
 
-    def __fetch_diff_log_frm_repo(self, base_target_info):
+    def __fetch_diff_log_from_repo(self, base_target_info):
         repo = self.__create_git_repository()
         fetched_on = datetime_utcnow().timestamp()
 
@@ -299,6 +299,7 @@ class Git(Backend):
             commit_ids = list(repo.diff_log(info['base'], info['target']))
             yield {
                 'fetched_on': fetched_on,
+                'metadata_id': f"{self.origin}@{info['base']}...{info['target']}",
                 'base': info['base'],
                 'target': info['target'],
                 'commit_ids': commit_ids
